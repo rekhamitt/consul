@@ -209,11 +209,27 @@ func (s *Server) initializeRootCA(provider ca.Provider, conf *structs.CAConfigur
 	if err != nil {
 		return fmt.Errorf("error getting root cert: %v", err)
 	}
-
 	rootCA, err := parseCARoot(rootPEM, conf.Provider, conf.ClusterID)
 	if err != nil {
 		return err
 	}
+
+	// Also create the intermediate CA, which is the one that actually signs leaf certs
+	interPEM, err := provider.GenerateIntermediate()
+	if err != nil {
+		return fmt.Errorf("error generating intermediate cert: %v", err)
+	}
+	_, err = connect.ParseCert(interPEM)
+	if err != nil {
+		return fmt.Errorf("error getting intermediate cert: %v", err)
+	}
+
+	commonConfig, err := conf.GetCommonConfig()
+	if err != nil {
+		return err
+	}
+	rootCA.PrivateKeyType = commonConfig.PrivateKeyType
+	rootCA.PrivateKeyBits = commonConfig.PrivateKeyBits
 
 	// Check if the CA root is already initialized and exit if it is,
 	// adding on any existing intermediate certs since they aren't directly
@@ -558,13 +574,15 @@ func (s *Server) secondaryCARootWatch(stopCh <-chan struct{}) {
 // the intentions there to the local state.
 func (s *Server) replicateIntentions(stopCh <-chan struct{}) {
 	args := structs.DCSpecificRequest{
-		Datacenter:   s.config.PrimaryDatacenter,
-		QueryOptions: structs.QueryOptions{Token: s.tokens.ReplicationToken()},
+		Datacenter: s.config.PrimaryDatacenter,
 	}
 
 	s.logger.Printf("[DEBUG] connect: starting Connect intention replication from primary datacenter %q", s.config.PrimaryDatacenter)
 
 	retryLoopBackoff(stopCh, func() error {
+		// Always use the latest replication token value in case it changed while looping.
+		args.QueryOptions.Token = s.tokens.ReplicationToken()
+
 		var remote structs.IndexedIntentions
 		if err := s.forwardDC("Intention.List", s.config.PrimaryDatacenter, &args, &remote); err != nil {
 			return err
